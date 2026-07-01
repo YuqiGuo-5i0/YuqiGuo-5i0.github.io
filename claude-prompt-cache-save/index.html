@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Prompt Cache 省钱详解：中转站怎么用好缓存 | KingFlow</title>
+<meta name="description" content="Claude Prompt Cache 省钱详解：中转站怎么用好缓存。KingFlow 国内直连、一个 Key 多模型、人民币充值、倍率透明，改一行 Base URL 即可接入。">
+<link rel="canonical" href="https://YuqiGuo-5i0.github.io/claude-prompt-cache-save/">
+<meta name="robots" content="index,follow">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Claude Prompt Cache 省钱详解：中转站怎么用好缓存 | KingFlow">
+<meta property="og:description" content="Claude Prompt Cache 省钱详解：中转站怎么用好缓存。KingFlow 国内直连、一个 Key 多模型、人民币充值、倍率透明，改一行 Base URL 即可接入。">
+<meta property="og:url" content="https://YuqiGuo-5i0.github.io/claude-prompt-cache-save/">
+<meta property="og:site_name" content="KingFlow">
+<meta property="og:image" content="https://www.kingflow.ai/logo.png">
+<meta name="twitter:card" content="summary">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="site-header">
+  <a class="brand" href="/">King<span>Flow</span></a>
+  <nav class="topnav"><a href="/">首页</a>
+<a href="/cline-claude-proxy/">Cline接入</a>
+<a href="/claude-proxy-legal/">合法吗</a>
+<a href="/claude-prompt-cache-save/" class="active">缓存省钱</a></nav>
+  <a class="cta" href="https://www.kingflow.ai" rel="noopener">前往官网 →</a>
+</header>
+<main>
+<article class="post">
+<h1>Claude Prompt Cache 省钱详解：中转站怎么用好缓存</h1>
+<div align="center">
+<h3>KingFlow · 国内直连 AI API 中转</h3>
+<a href="https://www.kingflow.ai"><img src="https://img.shields.io/badge/官网-www.kingflow.ai-FF6B35" alt="KingFlow"></a>
+</div>
+
+<p>用 Claude 写代码、跑 Agent 的人，账单大头往往不是输出，而是输入。你每次请求都要把一大坨 system 提示、工具定义、项目背景、历史对话重新喂进去，这部分 token 又长又重复，按满价算 input 就是白烧钱。Prompt Cache 就是专门解决这件事的机制。这篇讲清楚它怎么省钱、中转站是不是真的把这个能力透传给你、以及怎么把缓存用到收益最大。</p>
+<h2>一、什么是 Prompt Cache</h2>
+<p>一句话：把请求里那些<strong>重复不变的前缀</strong>（system、工具定义、固定文档）在服务端缓存起来，下一次相同前缀直接命中，命中的部分不再按满价的输入费算，而是按一个很低的缓存读取价走，通常只有正常输入价的十分之一左右（各家计费略有差异，以实际口径为准）。</p>
+<p>为什么这事能省一大截？因为 Claude 类工作负载有个典型特征：<strong>输入远大于输出</strong>。举个例子，你在 Claude Code 里问一句"帮我把这个函数改成异步的"，你打的字没几个，但随请求发出去的其实包含：几千 token 的 system 指令、一堆工具的 JSON schema、当前打开文件的上下文、之前几轮对话。真正变化的只有你最新那句话，前面一大块每轮都一模一样。</p>
+<p>没有缓存时，这一大块每轮都按满价 input 重算一遍。开了缓存后，第一次请求会多花一点点写入成本（缓存写入通常略高于普通输入），但从第二次开始，命中的前缀只按缓存读取价计费。轮数越多、前缀越长，省得越狠——长会话省下五成到九成的输入成本都不稀奇（具体比例看你前缀占比，软化理解）。</p>
+<p>工作机制上，缓存靠<strong>前缀哈希</strong>匹配。你用 <code>cache_control</code> 标记某个内容块为缓存断点，服务端会对这个断点之前的所有内容算一个哈希。下一次请求，只要这段前缀<strong>逐字节一致</strong>，就命中缓存。注意"逐字节"——差一个空格、换一个时间戳，哈希就变了，缓存就废了。这点后面细说。</p>
+<h2>二、中转站是否"真透传"是关键</h2>
+<p>这是很多人忽略、但直接决定你能不能省到钱的一环。</p>
+<p>Prompt Cache 是 Anthropic 官方 <code>/v1/messages</code> 协议里的能力。你走中转站的时候，问题来了：中转站到底有没有把 <code>cache_control</code> 参数原样转给上游、又有没有把上游返回的缓存计费字段原样带回来给你？</p>
+<p>有些中转站的实现是逆向反代（套 Cursor、套别的客户端协议），或者中间做了请求改写、把 messages 重新拼装了一遍。这类实现里，你的 <code>cache_control</code> 很可能在中途被吃掉，或者前缀被动过、哈希对不上,结果就是<strong>你以为开了缓存，实际每一轮都在按满价烧输入</strong>。账单该多少还是多少，缓存一分没省。</p>
+<p>判断一个中转是不是真透传，方法很简单，自己动手测一次就知道：</p>
+<p><strong>带 <code>cache_control</code> 连发两次同样的请求，看第二次响应里 <code>usage.cache_read_input_tokens</code> 是不是非零。</strong></p>
+<p>第一次请求是写入缓存，<code>cache_creation_input_tokens</code> 会有值、<code>cache_read_input_tokens</code> 为 0；第二次请求如果前缀命中，<code>cache_read_input_tokens</code> 就会是一个大数字，对应你前缀的长度。如果连发两次、第二次这个字段还是 0，那基本可以判定：这条链路的缓存没透传，别指望它省钱。</p>
+<p>一段最小验证请求长这样（Python，改一行 Base URL 指到中转即可）：</p>
+<pre><code class="language-python">import anthropic
+
+client = anthropic.Anthropic(
+    api_key=&quot;你的_KEY&quot;,
+    base_url=&quot;https://www.kingflow.ai&quot;,  # ANTHROPIC_BASE_URL 指向中转
+)
+
+SYS = &quot;这里放一大段稳定不变的 system 内容，越长越能看出效果……&quot; * 200
+
+def call():
+    return client.messages.create(
+        model=&quot;claude-sonnet-4-6&quot;,
+        max_tokens=64,
+        system=[{
+            &quot;type&quot;: &quot;text&quot;,
+            &quot;text&quot;: SYS,
+            &quot;cache_control&quot;: {&quot;type&quot;: &quot;ephemeral&quot;},  # 标记缓存断点
+        }],
+        messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;说一句话&quot;}],
+    )
+
+r1 = call()
+print(&quot;第一次 creation:&quot;, r1.usage.cache_creation_input_tokens,
+      &quot;read:&quot;, r1.usage.cache_read_input_tokens)
+r2 = call()
+print(&quot;第二次 creation:&quot;, r2.usage.cache_creation_input_tokens,
+      &quot;read:&quot;, r2.usage.cache_read_input_tokens)  # 这个非零才叫真透传
+</code></pre>
+<p>对应的 cURL 也是一样的思路，<code>system</code> 数组里的块加上 <code>"cache_control": {"type": "ephemeral"}</code>，连发两次对比 <code>usage</code> 字段。别嫌麻烦，这一步是你评估任何中转能不能省钱的硬门槛。</p>
+<h2>三、怎么用好缓存</h2>
+<p>透传没问题之后，能省多少就看你自己怎么组织请求了。几条经验：</p>
+<p><strong>1. 把稳定的内容放前面，多变的放后面。</strong>
+缓存是按前缀匹配的，命中的边界是"从头到你标记的断点"。所以顺序要按稳定性排：system 指令、工具定义、长文档这些几乎不变的放最前面并打上断点；用户当轮输入、动态检索结果这些每次都变的放最后。反过来放，前缀里混进一个变量，后面全废。</p>
+<p><strong>2. 别乱改 system，保持哈希一致。</strong>
+这是最常见的翻车点。很多人喜欢在 system 里塞当前时间戳、随机 request id、动态拼接的用户名——这些东西一变，前缀哈希就变，缓存直接不命中，等于没开。把这类动态内容挪到断点之后、或者干脆别放进被缓存的块里。同理，别每次微调措辞、别让格式化工具偷偷改缩进，缓存要的是逐字节稳定。</p>
+<p><strong>3. 长上下文和 Agent 场景收益最大。</strong>
+缓存的性价比跟"前缀占比 × 复用次数"正相关。一次性的短问答，缓存那点写入成本可能还没赚回来；但如果是：几千 token 的 system + 一大堆工具定义、要在一个会话里来回几十轮的 Agent，或者反复基于同一份长文档提问的场景——这时候前缀又长、复用又多，缓存基本是白捡的钱。Claude Code 这类编码 Agent 是最典型的受益者。</p>
+<p><strong>4. 注意缓存有生命周期。</strong>
+临时缓存（ephemeral）有个存活窗口，通常几分钟量级，被再次命中会续期。所以密集连续的调用命中率高；如果你两次请求隔了很久，缓存过期了就得重新写入。想让缓存值回票价，尽量让复用发生在窗口内。</p>
+<p><strong>5. 断点数量有上限，放在关键切分处。</strong>
+一次请求能设的缓存断点数量有限，别到处乱撒。典型做法是在"system 结尾""工具定义结尾""长文档结尾"这几个大块的边界各放一个，覆盖住最大的稳定前缀就够了。</p>
+<h2>四、KingFlow 的表现</h2>
+<p>回到透传这件事。KingFlow 走的是官方 <code>/v1/messages</code> 协议，不是逆向反代那一套，所以 <code>cache_control</code> 是原样往上游传、上游返回的 <code>cache_creation_input_tokens</code> / <code>cache_read_input_tokens</code> 也是原样带回来的。你用上面那段脚本连发两次，第二次的 <code>cache_read_input_tokens</code> 就是非零的——这就是"完整透传"的实际表现，缓存该省的它不给你截胡。</p>
+<p>对 Claude Code 这种输入远大于输出的负载来说，这一点直接体现在账单上：稳定前缀命中缓存后，输入成本能砍下相当大一块（我这边实测长会话省下的比例很可观，具体看你前缀占比）。另外后台能查到 token 用量和调用明细，你可以直接对着日志看每次请求到底命中了多少缓存读取，省了多少一目了然，不用靠猜。配置上就是把 <code>ANTHROPIC_BASE_URL</code> 指到 https://www.kingflow.ai、<code>ANTHROPIC_AUTH_TOKEN</code> 填你的 Key，其余照官方 SDK 用法不变。</p>
+<h2>五、实操 checklist</h2>
+<ul>
+<li>[ ] 先用连发两次的方法验证中转<strong>真透传</strong>缓存（第二次 <code>cache_read_input_tokens</code> 非零）</li>
+<li>[ ] 把 system、工具定义、长文档等<strong>稳定内容放前面</strong>，用户输入等动态内容放后面</li>
+<li>[ ] 在稳定大块的结尾打 <code>cache_control</code> 断点，别乱撒、别超上限</li>
+<li>[ ] system 里<strong>清掉时间戳/随机 id/动态拼接</strong>，保证前缀逐字节一致</li>
+<li>[ ] 让复用尽量密集，落在缓存<strong>存活窗口内</strong>，避免频繁重新写入</li>
+<li>[ ] 优先在<strong>长上下文 / 多轮 Agent</strong> 场景启用，短问答收益有限</li>
+<li>[ ] 上线后对着<strong>后台日志的 usage 字段</strong>核对命中率，别只凭感觉</li>
+</ul>
+<h2>六、FAQ</h2>
+<p><strong>Q1：开了缓存第一次反而更贵？</strong>
+是的，第一次是写入缓存，写入单价通常略高于普通输入。它是一次性成本，从第二次命中开始才回本。所以只在"会被复用"的前缀上开缓存才划算，一次性短请求没必要。</p>
+<p><strong>Q2：我明明加了 <code>cache_control</code>，为什么 <code>cache_read_input_tokens</code> 一直是 0？</strong>
+两种常见原因：一是前缀没保持一致，system 里有变量或格式被改动，哈希对不上；二是链路没真透传，中转把参数吃了。先固定住 system 排除第一种，再用连发两次验证第二种。</p>
+<p><strong>Q3：缓存能维持多久，会不会一直存着？</strong>
+临时缓存是有存活窗口的、不是永久的，被再次命中会续期，长时间不用就过期，下次得重新写入。所以密集连续调用命中率最高，间隔很久的调用别指望还命中。</p>
+<p><strong>Q4：换模型或改一点点 system 会影响缓存吗？</strong>
+会。缓存跟模型和前缀内容都绑定，换一个 model 就是另一套缓存；system 哪怕只改一个字，前缀哈希就变、缓存作废。要省钱就把被缓存的那部分内容锁死，别频繁动它。</p>
+</article>
+</main>
+<footer class="site-footer">
+  <p><strong>KingFlow</strong> · 国内直连、稳定低延迟的 Claude / GPT API 中转平台</p>
+  <p>官网：<a href="https://www.kingflow.ai" rel="noopener">www.kingflow.ai</a> ｜ 支持 Claude Code · OpenAI Codex · 全系 Claude / GPT 模型</p>
+  <p class="muted">© 2026 KingFlow. 本站为 KingFlow 中转方案与配置教程合集。</p>
+</footer>
+</body>
+</html>
